@@ -16,3 +16,31 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+data/
+docs/
+paper/
+tests/
+usage/
+
+# Documentation files
+*.md
+LICENSE
+NOTICE
+
+# Jupyter notebooks
+*.ipynb
+
+# Docker files (not needed in image)
+Dockerfile
+Dockerfile.dev
+docker-compose.yml
+
+# Build and CI scripts
+Makefile
+make.sh
+build_docs.py
+procfile
+
+# Development dependencies
+dev-requirements.txt
+pyproject.toml

@@ -5,7 +5,7 @@ This module provides REST endpoints for podcast generation and audio serving,
 with configuration management and temporary file handling.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 import os
 import shutil
@@ -46,10 +46,14 @@ app = FastAPI()
 TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp_audio")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-@app.post("/generate")
-def generate_podcast_endpoint(data: dict):
-    """"""
+# Store to track processing status
+processing_status = {}
+
+async def generate_podcast_background(filename: str, data: dict):
+    """Background task to generate podcast"""
     try:
+        processing_status[filename] = "processing"
+        
         # Set environment variables
         os.environ['OPENAI_API_KEY'] = data.get('openai_key')
         os.environ['GEMINI_API_KEY'] = data.get('google_key')
@@ -88,45 +92,73 @@ def generate_podcast_endpoint(data: dict):
             }
         }
 
-        # print(user_config)
-
         # Merge configurations
         conversation_config = merge_configs(base_config, user_config)
 
-        # print(conversation_config)
-        
-
         # Generate podcast
         result = generate_podcast(
-            urls=data.get('urls', []),
+            text=data.get('text'),
             conversation_config=conversation_config,
             tts_model=tts_model,
             longform=bool(data.get('is_long_form', False)),
         )
+        
         # Handle the result
+        output_path = os.path.join(TEMP_DIR, filename)
         if isinstance(result, str) and os.path.isfile(result):
-            filename = f"podcast_{os.urandom(8).hex()}.mp3"
-            output_path = os.path.join(TEMP_DIR, filename)
             shutil.copy2(result, output_path)
-            return {"audioUrl": f"/audio/{filename}"}
         elif hasattr(result, 'audio_path'):
-            filename = f"podcast_{os.urandom(8).hex()}.mp3"
-            output_path = os.path.join(TEMP_DIR, filename)
             shutil.copy2(result.audio_path, output_path)
-            return {"audioUrl": f"/audio/{filename}"}
         else:
-            raise HTTPException(status_code=500, detail="Invalid result format")
+            processing_status[filename] = "error"
+            return
+            
+        processing_status[filename] = "completed"
+        
+    except Exception as e:
+        print(f"Error generating podcast: {e}")
+        processing_status[filename] = "error"
+
+@app.post("/generate")
+async def generate_podcast_endpoint(data: dict, background_tasks: BackgroundTasks):
+    """Generate podcast asynchronously and return URL immediately"""
+    try:
+        # Generate unique filename
+        filename = f"podcast_{os.urandom(8).hex()}.mp3"
+        
+        # Add background task
+        background_tasks.add_task(generate_podcast_background, filename, data)
+        
+        # Return URL immediately
+        return {"audioUrl": f"/audio/{filename}"}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/audio/{filename}")
-def serve_audio(filename: str):
-    """ Get File Audio From ther Server"""
+async def serve_audio(filename: str):
+    """Get File Audio From the Server"""
     file_path = os.path.join(TEMP_DIR, filename)
-    if not os.path.exists(file_path):
+    
+    # Check if file exists and is ready
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    
+    # Check processing status
+    status = processing_status.get(filename, "not_found")
+    
+    if status == "processing":
+        return JSONResponse(
+            status_code=202, 
+            content={"status": "processing", "message": "Podcast is still being generated. Please try again in a few minutes."}
+        )
+    elif status == "error":
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": "An error occurred while generating the podcast."}
+        )
+    else:
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(file_path)
 
 @app.get("/health")
 def healthcheck():
