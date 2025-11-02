@@ -1,19 +1,18 @@
 """
 FastAPI implementation for Podcastify podcast generation service.
 
-This module provides REST endpoints for podcast generation and audio serving,
-with configuration management and temporary file handling.
+This module provides REST endpoints for podcast generation with automatic
+storage posting and callback notification.
 """
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse
 import os
-import shutil
 import yaml
 from typing import Dict, Any
 from pathlib import Path
 from ..client import generate_podcast
 import uvicorn
+import httpx
 
 
 def load_base_config() -> Dict[Any, Any]:
@@ -46,18 +45,17 @@ app = FastAPI()
 TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp_audio")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Store to track processing status
-processing_status = {}
-
-async def generate_podcast_background(filename: str, data: dict):
-    """Background task to generate podcast"""
+async def generate_podcast_background(data: dict):
+    """Background task to generate podcast and post to storage"""
+    audio_file_path = None
     try:
-        processing_status[filename] = "processing"
-        
         # Set environment variables
-        os.environ['OPENAI_API_KEY'] = data.get('openai_key')
-        os.environ['GEMINI_API_KEY'] = data.get('google_key')
-        os.environ['ELEVENLABS_API_KEY'] = data.get('elevenlabs_key')
+        if data.get('openai_key'):
+            os.environ['OPENAI_API_KEY'] = data.get('openai_key')
+        if data.get('google_key'):
+            os.environ['GEMINI_API_KEY'] = data.get('google_key')
+        if data.get('elevenlabs_key'):
+            os.environ['ELEVENLABS_API_KEY'] = data.get('elevenlabs_key')
 
         # Load base configuration
         base_config = load_base_config()
@@ -103,62 +101,119 @@ async def generate_podcast_background(filename: str, data: dict):
             longform=bool(data.get('is_long_form', False)),
         )
         
-        # Handle the result
-        output_path = os.path.join(TEMP_DIR, filename)
+        # Get the audio file path
         if isinstance(result, str) and os.path.isfile(result):
-            shutil.copy2(result, output_path)
+            audio_file_path = result
         elif hasattr(result, 'audio_path'):
-            shutil.copy2(result.audio_path, output_path)
+            audio_file_path = result.audio_path
         else:
-            processing_status[filename] = "error"
+            print(f"Error: Invalid result from generate_podcast: {result}")
             return
+        
+        # Post audio file to postURL
+        post_url = data.get('postURL')
+        if not post_url:
+            print("Error: postURL is required")
+            return
+        
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            # Read audio file and post it
+            with open(audio_file_path, 'rb') as audio_file:
+                file_content = audio_file.read()
+                files = {'file': (os.path.basename(audio_file_path), file_content, 'audio/mpeg')}
+                response = await client.post(post_url, files=files)
+                
+                if response.status_code not in (200, 201):
+                    print(f"Error posting to storage: {response.status_code} - {response.text}")
+                    return
+                
+                # Extract storageId from response
+                try:
+                    response_data = response.json()
+                    storage_id = response_data.get('storageId')
+                    if not storage_id:
+                        print(f"Error: storageId not found in response: {response_data}")
+                        return
+                except Exception as e:
+                    print(f"Error parsing storage response: {e}")
+                    return
+        
+        # Post storageId and userId to updateURL
+        update_url = data.get('updateURL')
+        if not update_url:
+            print("Error: updateURL is required")
+            return
+        
+        user_id = data.get('userId')
+        if not user_id:
+            print("Error: userId is required")
+            return
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            update_response = await client.post(
+                update_url,
+                json={
+                    'storageId': storage_id,
+                    'userId': user_id
+                }
+            )
             
-        processing_status[filename] = "completed"
+            if update_response.status_code not in (200, 201):
+                print(f"Error posting to updateURL: {update_response.status_code} - {update_response.text}")
+            else:
+                print(f"Successfully posted storageId {storage_id} for userId {user_id} to updateURL")
         
     except Exception as e:
         print(f"Error generating podcast: {e}")
-        processing_status[filename] = "error"
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Clean up temporary audio file if it exists
+        if audio_file_path and os.path.exists(audio_file_path):
+            try:
+                # Only delete if it's in our temp directory
+                if TEMP_DIR in audio_file_path:
+                    os.remove(audio_file_path)
+            except Exception as e:
+                print(f"Error cleaning up audio file: {e}")
 
 @app.post("/generate")
 async def generate_podcast_endpoint(data: dict, background_tasks: BackgroundTasks):
-    """Generate podcast asynchronously and return URL immediately"""
+    """
+    Generate podcast asynchronously, post to storage, and notify update URL.
+    
+    Required fields:
+    - userId: User identifier
+    - postURL: URL to post the generated audio file to
+    - updateURL: URL to post storageId and userId after successful upload
+    - text: Text content to generate podcast from
+    
+    Optional fields:
+    - openai_key, google_key, elevenlabs_key: API keys for TTS services
+    - tts_model: TTS model to use
+    - Other podcast configuration options
+    """
     try:
-        # Generate unique filename
-        filename = f"podcast_{os.urandom(8).hex()}.mp3"
+        # Validate required fields
+        if not data.get('userId'):
+            raise HTTPException(status_code=400, detail="userId is required")
+        if not data.get('postURL'):
+            raise HTTPException(status_code=400, detail="postURL is required")
+        if not data.get('updateURL'):
+            raise HTTPException(status_code=400, detail="updateURL is required")
+        if not data.get('text'):
+            raise HTTPException(status_code=400, detail="text is required")
         
         # Add background task
-        background_tasks.add_task(generate_podcast_background, filename, data)
+        background_tasks.add_task(generate_podcast_background, data)
         
-        # Return URL immediately
-        return {"audioUrl": f"/audio/{filename}"}
-
+        # Return immediately
+        return {"status": "accepted", "message": "Podcast generation started"}
+        
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/audio/{filename}")
-async def serve_audio(filename: str):
-    """Get File Audio From the Server"""
-    file_path = os.path.join(TEMP_DIR, filename)
-    
-    # Check if file exists and is ready
-    if os.path.exists(file_path):
-        return FileResponse(file_path)
-    
-    # Check processing status
-    status = processing_status.get(filename, "not_found")
-    
-    if status == "processing":
-        return JSONResponse(
-            status_code=202, 
-            content={"status": "processing", "message": "Podcast is still being generated. Please try again in a few minutes."}
-        )
-    elif status == "error":
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": "An error occurred while generating the podcast."}
-        )
-    else:
-        raise HTTPException(status_code=404, detail="File not found")
 
 @app.get("/health")
 def healthcheck():
