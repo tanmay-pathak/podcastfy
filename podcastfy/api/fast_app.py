@@ -110,10 +110,10 @@ async def generate_podcast_background(data: dict):
             print(f"Error: Invalid result from generate_podcast: {result}")
             return
         
-        # Post audio file to postURL
-        post_url = data.get('postURL')
-        if not post_url:
-            print("Error: postURL is required")
+        # Post audio file to uploadURL
+        upload_url = data.get('uploadURL')
+        if not upload_url:
+            print("Error: uploadURL is required")
             return
         
         async with httpx.AsyncClient(timeout=300.0) as client:
@@ -121,7 +121,7 @@ async def generate_podcast_background(data: dict):
             with open(audio_file_path, 'rb') as audio_file:
                 file_content = audio_file.read()
                 files = {'file': (os.path.basename(audio_file_path), file_content, 'audio/mpeg')}
-                response = await client.post(post_url, files=files)
+                response = await client.post(upload_url, files=files)
                 
                 if response.status_code not in (200, 201):
                     print(f"Error posting to storage: {response.status_code} - {response.text}")
@@ -149,13 +149,21 @@ async def generate_podcast_background(data: dict):
             print("Error: userId is required")
             return
         
+        # Get Bearer token from environment variable
+        api_key = os.getenv('UPDATE_URL_API_KEY')
+        if not api_key:
+            print("Error: UPDATE_URL_API_KEY environment variable not set")
+            return
+        
         async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = {'Authorization': f'Bearer {api_key}'}
             update_response = await client.post(
                 update_url,
                 json={
                     'storageId': storage_id,
                     'userId': user_id
-                }
+                },
+                headers=headers
             )
             
             if update_response.status_code not in (200, 201):
@@ -184,8 +192,8 @@ async def generate_podcast_endpoint(data: dict, background_tasks: BackgroundTask
     
     Required fields:
     - userId: User identifier
-    - postURL: URL to post the generated audio file to
-    - updateURL: URL to post storageId and userId after successful upload
+    - uploadURL: URL to post the generated audio file to
+    - updateURL: URL to post storageId and userId after successful upload (requires Bearer token from UPDATE_URL_API_KEY env var)
     - text: Text content to generate podcast from
     
     Optional fields:
@@ -197,8 +205,8 @@ async def generate_podcast_endpoint(data: dict, background_tasks: BackgroundTask
         # Validate required fields
         if not data.get('userId'):
             raise HTTPException(status_code=400, detail="userId is required")
-        if not data.get('postURL'):
-            raise HTTPException(status_code=400, detail="postURL is required")
+        if not data.get('uploadURL'):
+            raise HTTPException(status_code=400, detail="uploadURL is required")
         if not data.get('updateURL'):
             raise HTTPException(status_code=400, detail="updateURL is required")
         if not data.get('text'):
