@@ -119,8 +119,8 @@ async def generate_podcast_background(data: dict):
         async with httpx.AsyncClient(timeout=300.0) as client:
             # Read audio file and post it
             with open(audio_file_path, 'rb') as audio_file:
-                file_content = audio_file.read()
-                files = {'file': (os.path.basename(audio_file_path), file_content, 'audio/mpeg')}
+                filename = os.path.basename(audio_file_path)
+                files = {'file': (filename, audio_file.read(), 'audio/mpeg')}
                 response = await client.post(upload_url, files=files)
                 
                 if response.status_code not in (200, 201):
