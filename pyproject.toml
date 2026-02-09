@@ -12,8 +12,8 @@ include = [
 
 [tool.poetry.dependencies]
 python = "^3.11"
-setuptools = "^75.1.0"
-wheel = "^0.44.0"
+setuptools = ">=75.1,<79.0"
+wheel = ">=0.44,<0.47"
 cython = "^3.0.11"
 typer = "^0.12.5"
 python-dotenv = "^1.0.1"
